@@ -1,0 +1,250 @@
+---
+title: "Frog vs Traffic"
+author: "Asher Elazary"
+date: "2023-10-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+{
+  #data
+  library(tidyverse)
+  library(dplyr)
+  library(tidygeocoder)
+  #plotting
+  library(plotly)
+  library(ggplot2)
+  library(GGally)
+  #load audio
+  library(tuneR)
+  library(seewave)
+  #animals
+  library(galah)
+  #util
+  library(progress)
+  library(here)
+  #mapping
+  library(leaflet)
+  library(geojsonio)
+}
+```
+
+```{r init}
+#galah config/api
+galah_config(email = "s3931943@student.rmit.edu.au")
+
+root_folder <- 'C:/Users/Asher/Desktop/Assignment 3'
+setwd(root_folder)
+
+#target_species <- 'Crinia signifera'
+#target_species <- 'Psaltoda plaga'
+
+target_species <- 'Litoria ewingii'
+
+{
+  target_filepath <- target_species %>% str_replace(" ","_")
+  rds_filename <- target_filepath %>% paste(.,'.rds',sep="")
+  features_file <- paste(target_filepath,'observation_features.rds',sep='_')
+}
+```
+
+```{r galah_audio_scrape, echo=FALSE}
+#file scrape pipeline
+is_downloaded = 1
+if(!is_downloaded){
+  
+  dir.create(target_filepath)
+
+  #query database to get species records with audio attachments
+  media_data_query <- galah_call() %>%
+    galah_identify(target_species) %>%
+    galah_filter(
+      multimedia == "Sound"
+    ) %>%
+    atlas_media()
+  
+  #filter to audio filetype
+  media_data_all <- media_data_query %>% filter(str_detect(mime_type, "audio"))
+  #filter to species name if necessary
+  #media_data_all %>% group_by(scientificName) %>% summarise(count = n()) %>% arrange(desc(count))
+  target_media <- media_data_all %>% filter(scientificName==target_species)
+  #download files
+  target_media %>% collect_media(path = target_filepath)
+  
+  #save data query as rds
+  target_media %>% saveRDS(rds_filename)
+  
+  #get non wav files
+  conversion_list <- list.files(target_filepath) %>% paste(target_filepath,.,sep="/") %>% as_tibble() %>% filter(!str_detect(value,".wav"))
+  
+  #convert files via cmd ffmpeg 
+  setwd(paste(root_folder,target_filepath,sep="/"))
+  shell('for %i in (*.mpg) do ffmpeg -i "%i" "%~ni.wav')
+  setwd(paste(root_folder,target_filepath,sep="/"))
+  shell('for %i in (*.mp4) do ffmpeg -i "%i" "%~ni.wav')
+  
+  'for %i in (*wav) do ffmpeg -i "%i" "mp3/%~ni.mp3'
+  
+  'for %i in (*.wav) do ffmpeg -i "%i" -af "pan=stereo|c0=c0" output.wav'
+  setwd(root_folder)
+  #remove old files
+  file.remove(conversion_list$value)
+  #return to root folder
+}
+```
+
+```{r galah_audio_scrape, echo=FALSE}
+  doi1 <- galah_call() %>%
+    galah_identify('Litoria ewingii','Crinia signifera') %>%
+    galah_filter(
+      multimedia == "Sound"
+    ) %>%
+    atlas_occurrences()
+
+# See DOI 
+attr(doi1, "doi") 
+ 
+# Generate citation 
+atlas_citation(doi1) 
+```
+
+```{r audio_features}
+#add descriptors to dataframe and save
+is_processed=0
+if(!is_processed){
+  
+  #load files from query for processing
+  media_data <- readRDS(rds_filename)
+  #recordings path
+  #subset relevant rows/cols
+  observations <- media_data %>% 
+    select(
+      decimalLatitude,
+      decimalLongitude,
+      eventDate,
+      scientificName,
+      recordID,
+      media_id,
+      creator
+    )
+  
+  n_observations <- length(observations$media_id)
+  mean_freq <- vector("double", n_observations)
+  median_freq <- vector("double", n_observations)
+  centroid <- vector("double", n_observations)
+  rms <- vector("double", n_observations)
+  zero_cross_rate <- vector("double", n_observations)
+  spectral_entropy <- vector("double", n_observations)
+  spectral_flatness <- vector("double", n_observations)
+  NDSI <- vector("double", n_observations)
+  fpeak_max <- vector("double", n_observations)
+  
+  #progress bars
+  pb <- progress_bar$new(format = "[:bar] :current/:total (:percent)", total = n_observations)
+  pb$tick(0)
+  Sys.sleep(3)
+  
+  for (i in 1:n_observations) {
+    
+    #load file
+    thisFile <- observations$media_id[i]
+    filename <- file.path(target_filepath, paste0(thisFile, '.wav'))
+    
+    tryCatch({
+      sound <- readWave(filename)
+      #get sr
+      sr <- sound@samp.rate
+      #hp filter
+      sound_hp <- bwfilter(sound, f = sr, from = 3000, output = "matrix")
+      #get mean spectrum
+      this_spec <- meanspec(sound_hp, f = sr, plot = FALSE)
+      #get features
+      features <- this_spec %>% specprop(f = sr)
+      mean_freq[i] <- features$mean
+      median_freq[i] <- features$median
+      centroid[i] <- features$cent
+      rms[i] <- rms(sound_hp, f = sr)
+      zero_cross_rate[i] <- zcr(sound_hp, wl = NULL, f = sr, plot = FALSE)
+      spectral_entropy[i] <- sh(this_spec)
+      spectral_flatness[i] <- sfm(this_spec)
+      fpeak_max_val <- fpeaks(this_spec,plot=FALSE,nmax=4,bandpass=c(1000,16000))
+      fpeak_max_val <- fpeak_max_val[,1]*1000
+      #print(fpeak_max_val)
+      fpeak_max_val <- fpeak_max_val %>% max()
+      #print(fpeak_max_val)
+      fpeak_max[i] <- fpeak_max_val
+      NDSI[i] <- soundscapespec(sound, plot = FALSE, f = sr) %>% NDSI(max = TRUE)
+      
+    }, error = function(e) {
+      # Handle errors by setting corresponding values to NA
+      mean_freq[i] <- NA
+      median_freq[i] <- NA
+      centroid[i] <- NA
+      rms[i] <- NA
+      zero_cross_rate[i] <- NA
+      spectral_entropy[i] <- NA
+      spectral_flatness[i] <- NA
+      NDSI[i] <- NA
+      fpeak_max[i] <- NA
+      
+    })
+    
+    #progress bar ticks
+    pb$tick(1)
+    Sys.sleep(1 / 100)
+    
+  }
+
+  #append features and save
+  observations %>% mutate(
+    mean_freq=mean_freq,
+    median_freq=median_freq,
+    centroid=centroid,
+    rms=rms,
+    zero_cross_rate=zero_cross_rate,
+    spectral_entropy=spectral_entropy,
+    spectral_flatness=spectral_flatness,
+    NDSI=NDSI,
+    fpeak_max=fpeak_max
+  ) %>% saveRDS(features_file)
+
+}
+```
+
+```{r data}
+#load
+#observation_features <- readRDS(features_file)
+observation_features <- bind_rows(readRDS('Litoria_ewingii_observation_features.rds'), readRDS('Crinia_signifera_observation_features.rds'))
+
+observation_features <- observation_features %>% 
+  mutate(
+    eventDate=eventDate %>% as.Date(),
+    year=observation_features$eventDate %>% year(),
+    season = ifelse(month(eventDate) >= 7, year(eventDate), year(eventDate) - 1),
+    anthropogenic=(NDSI<0)
+  ) %>% 
+  filter(year>=2019)
+
+#add seasonal count to features
+observation_features <- observation_features %>%
+  group_by(season) %>%
+  mutate(
+    Seasonal_count = n(),
+  )
+```
+
+```{r geocoding}
+isGeocoded <- 1
+if(!isGeocoded){
+  geocoded <- observation_features %>%
+  reverse_geocode(
+    lat = decimalLatitude,
+    long = decimalLongitude,
+    method = 'osm',
+    full_results = TRUE
+  )
+
+  geocoded %>% saveRDS('Litoria_ewingii_Crinia_signifera_geocoded.rds')
+}
+```

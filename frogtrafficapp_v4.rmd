@@ -1,0 +1,353 @@
+---
+title: "Frog vs. Traffic Noise"
+author: "Asher Elazary"
+date: "2023-11-02"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    theme: 
+      version: 4
+      bootswatch: minty
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup}
+#data
+library(tidyverse)
+library(dplyr)
+library(tidygeocoder)
+#plotting
+library(plotly)
+library(ggplot2)
+#util
+library(here)
+#mapping
+library(leaflet)
+library(leaflegend)
+library(RJSONIO)
+library(sf)
+#app
+library(shiny)
+library(shinyjs)
+library(flexdashboard)
+library(fontawesome)
+
+# root_folder <- 'C:/Users/Asher/Desktop/Assignment 3'
+# setwd(root_folder)
+```
+
+```{r data, echo=FALSE,message=FALSE,warning=FALSE}
+observation_features <- bind_rows(
+  readRDS('Litoria_ewingii_observation_features.rds'),
+  readRDS('Crinia_signifera_observation_features.rds')
+)
+
+observation_features <- observation_features %>%
+  mutate(
+    eventDate=eventDate %>% as.Date(),
+    year=observation_features$eventDate %>% year(),
+    season = ifelse(month(eventDate) >= 7, year(eventDate), year(eventDate) - 1),
+    anthropogenic=if_else(NDSI <= 0, "Anthropogenic", "Natural")
+  ) %>%
+  filter(year>=2019)
+
+#add seasonal count to features
+observation_features <- observation_features %>%
+  group_by(season) %>%
+  mutate(
+    Seasonal_count = n(),
+  )
+
+observation_features <- observation_features %>%
+  mutate(
+    scientificName=scientificName %>% as.factor(),
+    anthropogenic=anthropogenic %>% as.factor()
+  ) %>% drop_na()
+
+geocoded <- readRDS('Litoria_ewingii_Crinia_signifera_geocoded.rds')
+
+geocoded <- geocoded %>% select(
+  decimalLatitude,
+  decimalLongitude,
+  address,
+  state) %>%
+  distinct(decimalLatitude,decimalLongitude)
+
+observations_geocoded <- geocoded %>% left_join(observation_features, by=c('decimalLatitude','decimalLongitude'))
+
+addResourcePath("Litoria_ewingii_Crinia_signifera", "Litoria_ewingii_Crinia_signifera")
+
+# traffic <- st_read("Traffic_Volume/Traffic_Volume.shp", quiet=TRUE)
+# traffic <- st_simplify(traffic, preserveTopology = FALSE, dTolerance = 10000)
+# traffic <- st_transform(traffic, crs = 4326)
+# bins <- c(min(traffic$ALLVEHS_AA, na.rm = TRUE), quantile(traffic$ALLVEHS_AA, probs = c(0.25, 0.5, 0.75)), max(traffic$ALLVEHS_AA, na.rm = TRUE))
+# pal <- colorBin("YlOrRd", domain = traffic$ALLVEHS_AA, bins = bins)
+
+#frog icon
+
+frogIcons <- awesomeIconList(
+  "Litoria ewingii"= makeAwesomeIcon(
+    text = fa("frog"),
+    icon = "frog",
+    iconColor = "black",
+    markerColor = "pink",
+    library = "fa"
+  ),
+  
+  "Crinia signifera" = makeAwesomeIcon(
+    text = fa("frog"),
+    icon = "frog",
+    iconColor = "black",
+    markerColor = "lightblue",
+    library = "fa"
+  )
+)
+
+filtered_data <- reactive({
+  #THIS LINE NEARLY KILLED ME.
+  req(input$ndsi_slider)
+  req(input$year_slider)
+  temp <- observations_geocoded %>% 
+    filter((NDSI > input$ndsi_slider[1]) & (NDSI <= input$ndsi_slider[2])) %>% 
+    filter((year >= input$year_slider[1]) & (year <= input$year_slider[2]))
+  if(is.null(temp)){ 
+    return(observations_geocoded)} else {return(temp)}
+})
+
+text_a <- "In the first two years there a lot less data to draw upon, but there is a large spike in anthropogenic sound in the start of 2020, as the mean frequency of frogs increases."
+
+text_b <- "on the other hand, between 2022 and 2023 there is a dip in anthropogenic sound pollution as the mean pitch decreases."
+
+text_c <- "Lastly, looking at all of the anthropogenic sound pollution data, we can see that the worst period for frogs in regards to noise pollution was around 2022 - 2023."
+
+useShinyjs(rmd = TRUE)
+```
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+In the last 10 years, there has been an increase in research showing that frogs have a tendency to increase the pitch of their calls in response to traffic noise. This project aims to highlight how this has occurred in Victoria, focusing on two widely researched species, 'Litoria ewingii' (the Southern brown tree frog) and 'Crinia signifera' (the Common eastern froglet). 
+
+Open access data has been scraped from the Australian Living Atlas, including geographic visualisation, and sound recordings: Click on the map markers to hear the field-recording associated with the observation. Click on the tab buttons to see some curated data, as well as an explanation. 
+
+The graph tracks the frequency of the frogs over time, each datapoint represents the audio recording's mean frequency value (also known as spectral centroid). The observations have been split into two groups, by computing the NDSI (Normalized Difference Soundscape Index) for each recording, named Anthropogenic and Natural. Anthropogenic values are grouped by NDSI readings from -1 to 0, and Natural values are grouped from NDSI values >0 to 1.
+
+-----------------------------------------------------------------------
+
+Row {data-height=850}
+-----------------------------------------------------------------------
+```{r,echo=FALSE,message=FALSE}
+
+#actionButton("stop_button", "Stop Audio")
+
+#init map
+output$map <- renderLeaflet({
+  leaflet() %>%
+    addTiles() %>%
+    addScaleBar() %>%
+    setView(
+      lat = mean(observations_geocoded$decimalLatitude),
+      lng = mean(observations_geocoded$decimalLongitude),
+      zoom = 10
+    ) %>%
+    addLegendAwesomeIcon(
+      iconSet = frogIcons,
+      orientation = 'horizontal',
+      title = "",
+      labelStyle = 'font-size: 16px;',
+      position = 'bottomright',
+      group = 'Frog Species'
+    )
+  # %>% addPolygons(
+  #     data = traffic,
+  #     color = ~pal(ALLVEHS_AA),
+  #     opacity = 0.5,
+  #     weight = 2,
+  #     smoothFactor = 0
+  #   )
+})
+
+# Update map
+observe({
+  # Get the filtered data from the reactive expression
+  markers <- filtered_data()
+  
+  if (nrow(markers) == 0) {
+    leafletProxy("map", session = getDefaultReactiveDomain()) %>%
+      clearMarkers()
+    return()
+  }
+
+  # Update the map with the new markers
+  leafletProxy("map", session = getDefaultReactiveDomain()) %>%
+    clearMarkers() %>%
+    addAwesomeMarkers(
+      data = markers,
+      lat = ~decimalLatitude,
+      lng = ~decimalLongitude,
+      label = ~scientificName,
+      icon = ~frogIcons[scientificName],
+      layerId = ~media_id,
+      popup = ~paste(
+        "Event Date: ", eventDate, "<br>",
+        "Creator: ", creator, "<br>",
+        "Mean Frequency: ", mean_freq, "<br>",
+        "NDSI Value: ", NDSI
+      )
+    )
+})
+
+leafletOutput("map")
+
+    #leaflet onclick play audio file
+    #create html audio player
+    tags$audio(id = "audioPlayer", balance = 1)
+
+    observeEvent(input$map_marker_click, {
+      click <- input$map_marker_click
+      if (is.null(click))
+        return()
+
+      audio_file <- click$id %>% paste('Litoria_ewingii_Crinia_signifera', ., sep = '/') %>% paste(., '.mp3', sep='')
+
+      output$Click_text <- renderText({
+        audio_file
+      })
+
+      # Set the audio source and play it
+      shinyjs::runjs(paste(
+        "$('#audioPlayer').attr('src', '", audio_file, "');",
+        "document.getElementById('audioPlayer').play();"
+      ))
+    })
+
+    #stop button action
+    observeEvent(input$stop_button, {
+      shinyjs::runjs("document.getElementById('audioPlayer').pause();")
+    })
+```
+Row
+-------------------------------------
+```{r,echo=FALSE,message=FALSE}
+   output$plot <- renderPlotly({
+
+      markers <- filtered_data()
+      
+      if (nrow(markers) == 0) {
+        markers <- observations_geocoded
+      }
+      p <- ggplot(markers %>% filter((mean_freq %>% scale %>% abs) < 3), 
+                  aes(x = eventDate, y = mean_freq, color = anthropogenic)) +
+        geom_line() + 
+        geom_smooth(method = 'loess') +
+        xlab("")+
+        scale_color_manual(values = c("Natural" = "turquoise", "Anthropogenic" = "maroon"))
+      
+      ggplotly(p)
+    
+    })
+
+    plotlyOutput('plot')
+```
+
+Row
+-------------------------------------
+```{r, echo=FALSE,message=FALSE}
+  # Buttons to act as tabs
+  div(id = "buttons",
+    actionButton("btn_tab1", "pt. 1"),
+    actionButton("btn_tab2", "pt. 2"),
+    actionButton("btn_tab3", "pt 3"),
+  )
+  
+  # Content for each "tab"
+  div(id = "tab1_content")
+  div(id = "tab2_content", style = "display: none;")
+  div(id = "tab3_content", style = "display: none;")
+  
+  year_preset <- reactiveVal(c(2019, 2023))
+  ndsi_preset <- reactiveVal(c(-1, 1))
+  text_preset <- reactiveVal("Click a button!")
+  # Observe events for buttons and update year_preset
+  observeEvent(input$btn_tab1, {
+    year_preset(c(2019, 2020))
+    ndsi_preset(c(-1, 1))
+    text_preset(text_a)
+  })
+  
+  observeEvent(input$btn_tab2, {
+    year_preset(c(2022, 2023))
+    ndsi_preset(c(-1, 1))
+    text_preset(text_b)
+  })
+  
+  observeEvent(input$btn_tab3, {
+    year_preset(c(2019, 2023))
+    ndsi_preset(c(-1, -0))
+    text_preset(text_c)
+  })
+```
+Row
+-------------------------------------
+```{r, echo=FALSE,message=FALSE}
+output$text_summary <- renderPrint({
+  # Assuming observations_geocoded is a reactive or available dataset
+  thisText <- text_preset()
+  print(thisText)
+})
+
+verbatimTextOutput("text_summary")
+```
+
+Row
+-------------------------------------
+```{r, echo=FALSE,message=FALSE}
+sliderInput('ndsi_slider', label = "Anthropogenic <--------> Natural", 
+          min = -1,
+          max = 1,
+          value = c(-1, 1),
+          step = 0.05)
+
+observe({
+  updateSliderInput(session, "ndsi_slider",
+                    value = ndsi_preset()
+  )
+})
+```
+Row
+-------------------------------------
+```{r, echo=FALSE,message=FALSE}
+sliderInput('year_slider', label = "Select years", 
+      min = 2019,
+      max = 2023,
+      value = c(2019,2023),
+)
+
+observe({
+  updateSliderInput(session, "year_slider",
+                    value = year_preset()
+  )
+})
+```
+
+Row
+-------------------------------------
+```{r, echo=FALSE,message=FALSE}
+output$table_summary <- renderTable({
+  filteredSummary <- filtered_data() %>%
+    group_by(anthropogenic) %>%
+    summarize(MeanFrequency = if(n() > 0) mean(mean_freq) else NA_real_, .groups = 'drop')
+  
+  completeSummary <- tidyr::complete(filteredSummary, anthropogenic, fill = list(MeanFrequency = NA_real_))
+
+  completeSummary <- completeSummary %>%
+  mutate(MeanFrequency = if_else(is.na(MeanFrequency), NA_character_, paste0(MeanFrequency %>% round(0), " Hz. mean")))
+
+  tableSummary <- completeSummary %>%
+    pivot_wider(names_from = anthropogenic, values_from = MeanFrequency)
+
+  tableSummary
+})
+
+tableOutput("table_summary")
+```
+
